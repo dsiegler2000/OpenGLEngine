@@ -1,0 +1,144 @@
+#version 410
+
+in vec2 pass_textureCoords;
+in vec3 surfaceNormal;
+in vec3 toLightVector[4];
+in vec3 toCameraVector;
+in float visibility;
+in vec4 shadowCoords;
+in vec4 worldPosition;
+
+layout (location = 0) out vec4 out_Color;
+layout (location = 1) out vec4 out_BrightColor;
+
+uniform sampler2D shadowMap;
+uniform float maxHeightOfLayers[15];
+uniform sampler2DArray heightTextures;
+uniform int numLayers;
+
+uniform vec3 skyColor;
+
+uniform vec3 lightColor[4];
+uniform vec3 attenuation[4];
+uniform float shineDamper;
+uniform float reflectivity;
+
+const int pcfCount = 2;
+const float totalTexels = (pcfCount * 2.0 + 1.0) * (pcfCount * 2.0 + 1.0);
+
+const float percentFromEdgeToStartBlendingLayers = 0.25; // percentage (of the total height) to start the transition from one layer to the next
+
+void main(void){
+
+	float mapSize = 8192.0;
+	float texelSize = 1.0 / mapSize;
+	float total = 0.0;
+	
+	for(int x = -pcfCount; x <= pcfCount; x++){
+	
+		for(int y = -pcfCount; y <= pcfCount; y++){
+		
+			float objectNearestLight = texture(shadowMap, shadowCoords.xy + vec2(x, y) * texelSize).r;
+		
+			if(shadowCoords.z > objectNearestLight){
+	
+				total += 1.0;
+		
+			}
+		
+		}
+	
+	}
+	
+	total /= totalTexels;
+
+	float lightFactor = 1.0 - (total * shadowCoords.w);
+	
+	vec3 unitNormal = normalize(surfaceNormal);
+	vec3 unitVectorToCamera = normalize(toCameraVector);
+		
+	vec3 totalDiffuse = vec3(0.0);
+	vec3 totalSpecular = vec3(0.0);
+
+	for(int i = 0; i < 4; i++){
+	
+		float distance = length(toLightVector[i]);
+		float attFactor = attenuation[i].x + (attenuation[i].y * distance) + (attenuation[i].z * distance * distance);
+		vec3 unitLightVector = normalize(toLightVector[i]);
+	
+		float nDot1 = dot(unitNormal, unitLightVector);
+		float brightness = max(nDot1, 0.0);
+		
+		vec3 lightDirection = -unitLightVector;
+		vec3 reflectedLightDirection = reflect(lightDirection, unitNormal);
+		
+		float specularFactor = dot(reflectedLightDirection, unitVectorToCamera);
+		specularFactor = max(specularFactor, 0.0);
+		float dampedFactor = pow(specularFactor, shineDamper);
+		
+		totalDiffuse += (brightness * lightColor[i]) / attFactor;
+		totalSpecular += (dampedFactor * reflectivity * lightColor[i]) / attFactor;
+	
+	}
+	
+	totalDiffuse = max(totalDiffuse * lightFactor, 0.4);
+	
+	float height = worldPosition.y;
+	vec4 layerColor;
+	int i = numLayers;
+	
+	for(i; i >= 0; i--){
+	
+		if(i == 0){
+		
+			break;
+		
+		}
+				
+		if(height >= maxHeightOfLayers[i - 1] && height < maxHeightOfLayers[i]){
+
+			break;
+		
+		}
+		
+	}
+	
+	float pctThroughLayer;
+	
+	vec2 tiledCoords = fract(pass_textureCoords * 256.0) / 4.0;
+	layerColor = texture(heightTextures, vec3(tiledCoords, i));
+	
+	if(i == 0){
+		
+		pctThroughLayer = 0.5f;
+	
+	}
+	
+	else{
+	
+		pctThroughLayer = (height - maxHeightOfLayers[i - 1]) / (maxHeightOfLayers[i] - maxHeightOfLayers[i - 1]);
+	
+	}
+		
+	if((pctThroughLayer <= percentFromEdgeToStartBlendingLayers) && (i > 0)){
+	
+		float mapping = clamp(1.0 - (pctThroughLayer * (1.0 / percentFromEdgeToStartBlendingLayers)), 0.0, 1.0);
+		layerColor = mix(layerColor, texture(heightTextures, vec3(tiledCoords.x, tiledCoords.y, i - 1)), mapping);
+		
+	}
+	
+	if((height <= maxHeightOfLayers[i] + 0.05 && height >= maxHeightOfLayers[i] - 0.05) || pctThroughLayer >= 1.0){
+		
+		layerColor = texture(heightTextures, vec3(tiledCoords.x, tiledCoords.y, i));
+					
+	}
+	
+	// out_Color = vec4(totalDiffuse, 1.0) * layerColor + vec4(totalSpecular, 1.0);
+	// out_Color = mix(vec4(skyColor, 1.0), out_Color, visibility);
+
+	out_Color = layerColor;
+	
+	out_BrightColor = vec4(0.0);
+	
+	
+}
